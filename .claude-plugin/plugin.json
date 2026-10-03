@@ -1,0 +1,58 @@
+{
+  "name": "orch",
+  "version": "0.3.0",
+  "description": "Orchestrator sessions: bind to .remember/<slug>/README.md, keep the role in the system prompt, and at a context limit ask for a handoff, then compact when the handoff_done tool signals that it is written",
+  "author": {
+    "name": "chris"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "rememberRoot": {
+      "type": "string",
+      "title": "Handoff root folder",
+      "description": "Folder, relative to the session directory, that holds one <slug>/README.md for each orchestrator project.",
+      "default": ".remember"
+    },
+    "limitPercent": {
+      "type": "number",
+      "title": "Context limit (percent)",
+      "description": "Context fill, in percent of the model window, at which the handoff and compaction sequence starts.",
+      "default": 55
+    },
+    "warnPercent": {
+      "type": "number",
+      "title": "Context warning (percent)",
+      "description": "Context fill at which one warning shows. The sequence arms again only after the fill drops below this value.",
+      "default": 45
+    },
+    "limitTokens": {
+      "type": "number",
+      "title": "Context limit (tokens)",
+      "description": "Optional token limit. 0 turns it off. When set, the sequence starts at this limit or at the percent limit, whichever comes first.",
+      "default": 0
+    },
+    "mode": {
+      "type": "string",
+      "title": "At the limit",
+      "description": "auto: update the handoff and compact. ask: show a message, the person runs /orch handoff. off: do nothing at the limit.",
+      "options": [
+        "auto",
+        "ask",
+        "off"
+      ],
+      "default": "auto"
+    },
+    "readmeMaxLines": {
+      "type": "number",
+      "title": "README size warning (lines)",
+      "description": "The bind output warns when the README has more lines than this.",
+      "default": 300
+    },
+    "handoffWaitMinutes": {
+      "type": "number",
+      "title": "Wait for the handoff signal (minutes)",
+      "description": "How long a handoff sequence waits, after the handoff turn, for the handoff_done call (or the code in the marker file). At the limit the sequence stops with no compaction.",
+      "default": 10
+    }
+  }
+}
