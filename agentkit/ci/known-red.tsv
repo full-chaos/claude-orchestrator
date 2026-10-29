@@ -1,0 +1,2 @@
+# known-red.tsv: non-required CI jobs allowed to be red. Tab-separated: job_name<TAB>ticket<TAB>expiry YYYY-MM-DD (UTC).
+# A row past its expiry does NOT exempt. mcheck prints exempted red names as knownred=[...].

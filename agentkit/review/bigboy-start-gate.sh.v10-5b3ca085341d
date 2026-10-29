@@ -1,0 +1,447 @@
+#!/usr/bin/env bash
+#
+# bigboy-start-gate.sh -- the canonical, fail-closed start gate for bigboy.
+#
+# WHY THIS IS A FILE AND NOT A COMMAND LINE
+#
+# Two separate incidents made a script file mandatory rather than tidy:
+#
+#   1. An inline `ssh host 'pgrep -f "<pattern>"'` gate SELF-MATCHES: the remote
+#      bash's own argv contains the pattern text, so the count is inflated by the
+#      gate's own command. Cost three false aborts in one night. In a FILE run by
+#      path, the pattern never appears in the checking process's argv.
+#   2. A DOUBLE-quoted `$(...)` inside `ssh host "..."` expands on the LOCAL
+#      machine before the connection opens, silently returning empty -- and an
+#      empty read was then treated as a pass.
+#
+# Every lane calls this file. Do not re-type its logic into a command line.
+#
+# WHY EVERY READ IS CHECKED SEPARATELY FROM ITS COUNT
+#
+# The previous form was:
+#     r=$(docker ps --filter label=org.testcontainers --format '{{.Image}}' | grep -c ryuk || true)
+# When `docker ps` fails it prints nothing; `grep -c` on empty input prints "0"
+# and exits 1; `|| true` masks the exit; `$(...)` captures the STRING "0". The
+# docker failure is laundered into a legitimate-looking zero -- and zero is the
+# MOST PERMISSIVE answer this gate can produce, so the gate waved launches
+# through exactly when the box was least healthy. A "must parse numeric" guard
+# cannot catch it, because "0" is numeric: it checks the wrong property.
+# Reproduced 2026-09-04 (lane-port-testops) with docker replaced by a
+# nonexistent binary: n=[0] r=[0] total=0 -> launch ALLOWED.
+#
+# So: each command's OWN exit status is checked, and `|| true` survives only on
+# the greps, where a zero-match genuinely means zero.
+#
+# USAGE (run ON bigboy, by absolute path):
+#     bash /var/lib/oci-cache/lane-scratch/_shared/bigboy-start-gate.sh [max_total] [starts_container]
+#
+#   max_total         integer, default 4. The cap counts THE RUN BEING STARTED:
+#                     the check is total + 1 <= max_total, not total < max_total.
+#   starts_container  yes|no, default yes. `no` for a launch that starts no
+#                     container (e.g. a codex round, which is exempt from the
+#                     container count but still subject to load and userns).
+#
+#   MAX_LOAD1 (env)   Override the load ceiling. UNSET is the normal case: the
+#                     default is chosen from starts_container, per the split-gate
+#                     ruling (2026-09-04) --
+#                     Applies to starts_container=yes ONLY (default 64).
+#                     A ROUND (starts_container=no) does not gate on load1 at all
+#                     -- see MAX_RUNNABLE.
+#
+#   MAX_RUNNABLE(env) default 64 (2x cores). Applies to starts_container=no ONLY.
+#
+#   MAX_ROUNDS (env)  default 3. Max CONCURRENT codex rounds box-wide. Applies to
+#                     starts_container=no ONLY, and counts the round being
+#                     started: rounds + 1 <= MAX_ROUNDS, the same "would this
+#                     launch exceed it" shape as the container cap.
+#
+# WHY ROUNDS GATE ON RUNNABLE AND CONTAINERS GATE ON LOAD1 (ruling, 2026-09-04)
+#
+# load1 on Linux counts D-state (uninterruptible IO) threads, not just runnable
+# ones. bigboy reached load1 228 with a run queue of 38/6023: the box was waiting
+# on the shared oci-cache volume during a compile burst, with CPU largely idle.
+# Gating a CODEX ROUND on that number parks work that needs CPU because of a
+# queue on DISK -- the resource it does not use. So a round gates on RUNNABLE.
+# A container-starting launch keeps gating on load1, because IO contention is
+# exactly what makes a Testcontainers gate flaky, so for that case load1's
+# inclusion of D-state is a feature, not noise.
+#
+# Runnable is sampled THREE TIMES, one second apart, and the MAX is used. A
+# single sample of an instantaneous counter is noise -- across one earlier sweep
+# it moved 1..23 on an otherwise unchanged box. Taking the max biases toward
+# refusing, which is the correct direction for a gate.
+#
+# OUTPUT: exactly one line, e.g.
+#     GATE=OK n=1 r=2 total=3 load1=12.66 max_load1=64 runq=7/5208 runnable_max=7 max_runnable=64 codex_live=0 wrapper_rounds=0 rounds=0 max_rounds=3 next_rounds=1 userns_clone=1 apparmor_userns=0 max_total=4 next=4
+#     GATE=REFUSED n=1 r=3 total=4 load1=12.66 max_load1=64 runq=7/5208 runnable_max=7 max_runnable=64 codex_live=0 wrapper_rounds=0 rounds=0 max_rounds=3 next_rounds=1 userns_clone=1 apparmor_userns=0 max_total=4 next=5 reason=container_cap
+# Exit 0 ONLY on GATE=OK. Any failed or non-numeric read exits nonzero with
+# reason=... naming which read failed -- never a silent pass.
+#
+# IDENTITY IS THE PATH, NOT A SHA. This file is under active revision (v1 -> v3
+# in one afternoon: a fail-open, a split ceiling, a wrong sysctl). A sha quoted
+# in a message goes stale within the hour, and a lane that pins one will run an
+# older gate than the fleet believes. Call the deployed path and read the output
+# line; if you need to prove which revision ran, `sha256sum` it AT RUN TIME and
+# quote that, rather than comparing against a number someone broadcast earlier.
+#
+# CREDENTIAL-FREE by construction: reads nothing but load, process names, a
+# sysctl and `docker ps`. Never echo a credential from a caller into this file.
+
+set -uo pipefail
+
+is_uint() { case "$1" in ('' | *[!0-9]*) return 1 ;; (*) return 0 ;; esac; }
+# A load average is a decimal: digits, optionally one dot then digits.
+is_load() { case "$1" in ('' | *[!0-9.]* | *.*.*) return 1 ;; (*) return 0 ;; esac; }
+
+# count_codex_live: prints the number of GENUINE live codex rounds on stdout,
+# returns 0. Returns 2 (nothing printed) only when `pgrep` itself failed hard
+# (exit >=2) -- exit 1 ("no match") is a legitimate zero, folded into the
+# printed count, not an error.
+#
+# v10 (CF's controlled sample, 2026-09-05 23:34Z): `pgrep -x codex` alone
+# over-counts. `codex exec` re-execs itself as a TRANSIENT helper for every
+# shell command it runs inside a round -- COMM stays "codex" (same binary,
+# so `pgrep -x codex` still matches it), but that helper's OWN argv[0] is
+# "codex-linux-sandbox". CF's sample: `pgrep -x codex` read 6-7 for 3 REAL
+# rounds live (16 read = ~2 rounds, the shape that motivated this fix) -- the
+# extras were exactly these per-exec-block helpers, not additional rounds.
+# Filtering on argv[0] (read from /proc/<pid>/cmdline, NUL-separated, first
+# field) drops them without touching the `pgrep -x codex` self-match immunity
+# the comment below still documents.
+#
+# A ppid-rollup fix (count only processes whose PARENT is not itself a codex
+# process) was the FIRST draft of this fix and is SUPERSEDED by the argv[0]
+# filter above once CF's sample identified the actual mechanism: the extras
+# are a re-exec helper identifiable by its own argv[0], not children whose
+# ancestry needs walking. Keeping this note because the wrong mechanism was
+# briefly the working theory and a future reader re-deriving this fix by hand
+# would otherwise retrace the same dead end.
+count_codex_live() {
+  local raw pid rc count argv0
+  raw=$(pgrep -x codex)
+  rc=$?
+  if [ "$rc" -ge 2 ]; then
+    return 2
+  fi
+  count=0
+  if [ -n "$raw" ]; then
+    for pid in $raw; do
+      argv0=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | head -n1)
+      [ "$argv0" = "codex-linux-sandbox" ] && continue
+      count=$((count + 1))
+    done
+  fi
+  printf '%s\n' "$count"
+  return 0
+}
+
+# --self-test: fabricate one leader + three codex-linux-sandbox-argv0
+# children (a symlink to `sleep` named `codex`, so COMM reads "codex" the
+# same way a real round's binary does) and assert count_codex_live() rises by
+# EXACTLY 1, not 4. A BEFORE/AFTER DELTA, not an absolute count: bigboy is a
+# shared, always-busy box -- other lanes' real codex rounds are routinely
+# live at the same moment this self-test runs (measured live, 2026-09-06: 5
+# real rounds already up when this test's first draft asserted an absolute
+# "=1" and failed on real, not fabricated, processes). The delta is what
+# actually proves the filter -- it holds regardless of how many genuine
+# rounds are concurrently live on the box.
+#
+# Exits before any normal gate argument parsing, so it can be invoked with no
+# other arguments and never touches the live gate decision path.
+if [ "${1:-}" = "--self-test" ]; then
+  self_test_dir=$(mktemp -d "${TMPDIR:-/tmp}/bigboy-gate-selftest.XXXXXX") || {
+    echo "SELFTEST FAIL: mktemp failed" >&2
+    exit 1
+  }
+  self_test_pids=()
+  cleanup_self_test() {
+    [ "${#self_test_pids[@]}" -gt 0 ] && kill "${self_test_pids[@]}" 2>/dev/null
+    [ "${#self_test_pids[@]}" -gt 0 ] && wait "${self_test_pids[@]}" 2>/dev/null
+    rm -rf "$self_test_dir"
+  }
+  trap cleanup_self_test EXIT
+
+  before=$(count_codex_live)
+  before_rc=$?
+  if [ "$before_rc" -ge 2 ]; then
+    echo "SELFTEST FAIL: count_codex_live refused before fabrication (rc=$before_rc)" >&2
+    exit 1
+  fi
+
+  ln -s "$(command -v sleep)" "$self_test_dir/codex"
+
+  # One LEADER: argv[0] is whatever invoked it (the path), never the helper
+  # name -- what a real round's own `codex exec` process looks like.
+  "$self_test_dir/codex" 30 &
+  self_test_pids+=("$!")
+  # Three CHILDREN: same binary (COMM "codex"), argv[0] overridden to the
+  # re-exec helper's name via `exec -a` -- what a real round's per-exec-block
+  # helpers look like from this gate's point of view.
+  for _ in 1 2 3; do
+    bash -c 'exec -a codex-linux-sandbox "$1" 30' _ "$self_test_dir/codex" &
+    self_test_pids+=("$!")
+  done
+  sleep 1 # let the execs land before pgrep samples them
+
+  after=$(count_codex_live)
+  after_rc=$?
+  if [ "$after_rc" -ge 2 ]; then
+    echo "SELFTEST FAIL: count_codex_live refused after fabrication (rc=$after_rc)" >&2
+    exit 1
+  fi
+
+  delta=$((after - before))
+  if [ "$delta" != "1" ]; then
+    echo "SELFTEST FAIL: fabricated 1 leader + 3 codex-linux-sandbox children, count_codex_live() rose by $delta (before=$before after=$after), want +1" >&2
+    exit 1
+  fi
+  echo "SELFTEST OK: count_codex_live() rose by exactly 1 (before=$before after=$after) for 1 leader + 3 codex-linux-sandbox children"
+  exit 0
+fi
+
+max_total="${1:-4}"
+starts_container="${2:-yes}"
+
+# refuse <reason> -- single-line output, nonzero exit. Values default to "?" so
+# the line shape is stable even when the failing read produced nothing.
+refuse() {
+  printf 'GATE=REFUSED n=%s r=%s total=%s load1=%s max_load1=%s runq=%s runnable_max=%s max_runnable=%s codex_live=%s wrapper_rounds=%s rounds=%s max_rounds=%s next_rounds=%s userns_clone=%s apparmor_userns=%s max_total=%s next=%s reason=%s\n' \
+    "${n:-?}" "${r:-?}" "${total:-?}" "${load1:-?}" "${max_load1:-?}" "${runq:-?}" "${runnable_max:-?}" "${max_runnable:-?}" "${codex_live:-?}" "${wrapper_rounds:-?}" "${rounds:-?}" "${max_rounds:-?}" "${next_rounds:-?}" "${userns_clone:-?}" "${apparmor_userns:-?}" \
+    "${max_total}" "${next:-?}" "$1"
+  exit 1
+}
+
+case "$max_total" in ('' | *[!0-9]*) refuse "bad_arg_max_total" ;; esac
+case "$starts_container" in (yes | no) : ;; (*) refuse "bad_arg_starts_container" ;; esac
+
+# Resolved only AFTER starts_container is validated -- so an invalid arg can
+# never silently pick a ceiling.
+max_load1="${MAX_LOAD1:-64}"
+max_runnable="${MAX_RUNNABLE:-64}"
+max_rounds="${MAX_ROUNDS:-3}"
+is_load "$max_load1" || refuse "bad_env_max_load1"
+is_uint "$max_runnable" || refuse "bad_env_max_runnable"
+is_uint "$max_rounds" || refuse "bad_env_max_rounds"
+
+# ---- load1 -------------------------------------------------------------
+# /proc/loadavg is read directly rather than parsed out of `uptime`, whose
+# wording differs across systems ("load average:" vs "load averages:") and
+# whose decimal separator follows the locale.
+if [ ! -r /proc/loadavg ]; then
+  refuse "loadavg_unreadable"
+fi
+load1=$(cut -d' ' -f1 < /proc/loadavg) || refuse "loadavg_read_failed"
+is_load "$load1" || refuse "loadavg_non_numeric"
+
+# ---- run queue (REPORTING ONLY, never a gate condition) ----------------
+# /proc/loadavg field 4 is "<runnable>/<total>". load1 alone cannot separate a
+# CPU-saturated box from one whose threads are parked in D-state on IO -- and
+# that distinction is exactly what decided the 2026-09-04 hold: load1 245 on 32
+# cores with a run queue of only 7 meant IO wait on the shared oci-cache volume
+# during a compile burst, not CPU exhaustion. Reported so a human can make that
+# call from one line instead of re-deriving it by hand.
+#
+# Deliberately NOT gated on: a low run queue with a high load1 still means the
+# box is a bad place to start work, and this gate stays conservative rather than
+# second-guessing load1 with a heuristic.
+runq=$(cut -d' ' -f4 < /proc/loadavg) || refuse "runq_read_failed"
+runnable=${runq%%/*}
+is_uint "$runnable" || refuse "runq_non_numeric"
+
+# runnable_max: the value a ROUND gates on. Sampled only on that path -- a
+# container launch would pay 2s of sleep for a number it does not use.
+# "-" (not sampled) is printed rather than a stale or invented figure.
+runnable_max="-"
+if [ "$starts_container" = "no" ]; then
+  runnable_max="$runnable"
+  for _sample in 1 2; do
+    sleep 1
+    sample_runq=$(cut -d' ' -f4 < /proc/loadavg) || refuse "runq_read_failed"
+    sample_runnable=${sample_runq%%/*}
+    is_uint "$sample_runnable" || refuse "runq_non_numeric"
+    [ "$sample_runnable" -gt "$runnable_max" ] && runnable_max="$sample_runnable"
+  done
+fi
+
+# ---- live codex rounds -------------------------------------------------
+# `pgrep -x` matches the EXECUTABLE NAME exactly, so this script (running as
+# `bash`) cannot match itself the way a `pgrep -f` on a pattern would.
+# Exit 1 means "no match" and is a legitimate zero; exit >=2 is a real pgrep
+# failure and must NOT be read as zero. codex_live: rounds currently inside
+# `codex exec`, via count_codex_live() above (v10: excludes the transient
+# codex-linux-sandbox re-exec helper, see that function's own comment).
+codex_live=$(count_codex_live)
+codex_live_rc=$?
+if [ "$codex_live_rc" -ge 2 ]; then
+  refuse "pgrep_failed_rc${codex_live_rc}"
+fi
+is_uint "$codex_live" || refuse "codex_live_non_numeric"
+
+# wrapper_rounds: rounds that EXIST but are not yet inside codex exec.
+#
+# A round spends its first minutes in the wrapper's WARM PHASE -- go mod
+# download, build, vet -- before `codex exec` is ever spawned. During that
+# window `pgrep -x codex` reads 0, so a cap built on codex_live alone admits a
+# second round for minutes on a cold cache. Found live by lane-port-work-items.
+#
+# The wrapper forks (outer script -> inner script -> leaf), so counting
+# PROCESSES would multi-count one round. Rounds are identified by their `-n
+# <name>` argument and DEDUPED by name. A wrapper invoked without `-n` cannot be
+# deduped, so it is keyed by pid instead -- counting it once is right, and
+# dropping it would undercount, which is the failure this closes.
+#
+# COUNT ONLY THE WRAPPER ITSELF, and require -n. v6-v7 counted any process whose
+# command line MENTIONED codex-review.sh, with a pid fallback for those lacking
+# -n. Both halves were wrong, and together they were worse: lane-5055's two
+# watcher loops (`until ... pgrep -f "codex-review.sh.*chaos-5055-r1"`) mention
+# the name, carry no -n, and each took a distinct pid: key -- wrapper_rounds=3
+# with ONE real round live, refusing the whole fleet on rounds_cap. The pid
+# fallback was added in v6 reasoning that dropping an un-named wrapper would
+# undercount; that premise is false, because a real wrapper ALWAYS passes -n, so
+# the fallback could only ever catch non-wrappers. Requiring -n and requiring the
+# script to BE argv[1]/argv[2] closes both.
+#
+# `tr -d` strips shell quotes from the extracted name. The `bash -lc` LAUNCHER
+# line carries its whole command as ONE argv element with the name quoted inside
+# it, so one round yielded a SECOND key ('name' as well as name) and
+# wrapper_rounds inflated by +1 per live launcher -- measured 2026-09-04: the
+# gate reported 3 (earlier 7) where the true distinct-name count was 2. It
+# over-refuses, never over-admits, but at cap 3 that is enough to refuse the
+# whole fleet on a phantom round. Done with tr rather than an awk gsub because a
+# literal single quote cannot be embedded in a single-quoted awk program without
+# ending it; a round name never legitimately contains a quote.
+#
+# `codex-review[.]sh` bracket-quotes the dot so the pattern cannot match this
+# gate's own argv; the gate additionally runs from a FILE, so its command line
+# never contains the pattern text at all.
+wrappers_raw=$(pgrep -fa 'codex-review[.]sh')
+wrapper_rc=$?
+if [ "$wrapper_rc" -ge 2 ]; then
+  refuse "pgrep_wrapper_failed_rc${wrapper_rc}"
+fi
+if [ -z "$wrappers_raw" ]; then
+  wrapper_rounds=0
+else
+  wrapper_rounds=$(printf '%s\n' "$wrappers_raw" | awk '
+    NF == 0 { next }
+    {
+      # Count ONLY the wrapper script itself: argv[1] or argv[2] must BE
+      # codex-review.sh (`/path/codex-review.sh ...` or `bash /path/...sh ...`).
+      # Anything else that merely MENTIONS the name in its command line is a
+      # bystander, not a round.
+      if ($2 !~ /codex-review\.sh$/ && $3 !~ /codex-review\.sh$/) next
+      key = ""
+      for (i = 2; i < NF; i++) if ($i == "-n") { key = $(i + 1); break }
+      # NO pid fallback: a real wrapper ALWAYS passes -n, so a matching line
+      # without one is not a round and must not be counted.
+      if (key == "") next
+      print key
+    }' | tr -d '\047"' | sort -u | grep -c . || true)
+fi
+is_uint "$wrapper_rounds" || refuse "wrapper_rounds_non_numeric"
+
+# The enforced figure is the MAX: a round is present if EITHER signal sees it.
+if [ "$wrapper_rounds" -gt "$codex_live" ]; then
+  rounds="$wrapper_rounds"
+else
+  rounds="$codex_live"
+fi
+is_uint "$rounds" || refuse "rounds_non_numeric"
+# Counts the round being started, exactly like next=total+1 for containers.
+next_rounds=$((rounds + 1))
+
+# ---- apparmor userns restriction ---------------------------------------
+# THE KNOB THAT MATTERS IS kernel.apparmor_restrict_unprivileged_userns, and
+# its polarity is INVERTED from the obvious reading: 0 = unrestricted = a codex
+# round can execute; 1 = RESTRICTED = it cannot.
+#
+# v1 of this script read kernel.unprivileged_userns_clone instead, on the
+# strength of it being the familiar knob rather than a verified one. Both exist
+# on bigboy and they disagree in the dangerous direction --
+#   kernel.unprivileged_userns_clone            = 1   ("looks fine")
+#   kernel.apparmor_restrict_unprivileged_userns = 0   (the real state)
+# -- so the old check would have reported userns=1 "enabled" and PASSED a round
+# even with the restriction re-enabled after a reboot, which is the exact
+# failure this field exists to catch. /etc/sysctl.d/99-codex-userns.conf sets
+# ONLY `kernel.apparmor_restrict_unprivileged_userns = 0`, confirming which one
+# the reboot resets. Found by lane-compat-classify.
+#
+# Read and reported for every launch; ENFORCED only for a non-container launch
+# (a codex round), since a plain docker/go-test run does not depend on it.
+# Both knobs are reported as SEPARATE fields. Reporting only the enforced one
+# would leave `userns=` looking authoritative while verifying nothing, which is
+# how v1's defect hid; reporting only apparmor would lose the contrast that
+# makes the defect obvious to the next reader. userns_clone is INFORMATIONAL --
+# nothing branches on it.
+userns_clone=$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null)
+[ -n "$userns_clone" ] || userns_clone="absent"
+apparmor_userns=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null)
+if [ -z "$apparmor_userns" ]; then
+  # Absent is reported honestly rather than guessed at. For a round it is FATAL
+  # below: an unreadable knob is not evidence the restriction is off.
+  apparmor_userns="absent"
+else
+  is_uint "$apparmor_userns" || refuse "apparmor_userns_non_numeric"
+fi
+
+# ---- container counts --------------------------------------------------
+# Each `docker ps` exit status is checked BEFORE its output is counted -- see
+# the header. This is fatal even for starts_container=no: a box whose docker is
+# unreachable is not a box to launch anything on, and reporting an unverified
+# count would re-create the fail-open this gate exists to close.
+raw_names=$(docker ps --format '{{.Names}}') || refuse "docker_ps_names_failed"
+raw_images=$(docker ps --filter label=org.testcontainers --format '{{.Image}}') || refuse "docker_ps_images_failed"
+
+# n: hand-launched lane scratch databases (lane-<name>-ch / -pg).
+n=$(printf '%s\n' "$raw_names" | grep -Ec '^lane-.*-(ch|pg)$' || true)
+# r: testcontainers REAPERS. One reaper per testcontainers session, so this
+# counts concurrent RUNS, not containers -- a single run also starts its own
+# database containers under docker's random names, which are deliberately NOT
+# counted here. Matched on the ryuk IMAGE: the container's NAME is
+# `reaper_<64-hex>` and contains no "ryuk" at all (verified on bigboy,
+# 2026-09-04: reaper_aaa94904... / ghcr.io/full-chaos/testcontainers/ryuk:0.14.0).
+r=$(printf '%s\n' "$raw_images" | grep -c ryuk || true)
+is_uint "$n" || refuse "n_non_numeric"
+is_uint "$r" || refuse "r_non_numeric"
+total=$((n + r))
+next=$((total + 1))
+
+# ---- decisions ---------------------------------------------------------
+if [ "$starts_container" = "yes" ]; then
+  # Container-starting launch gates on load1, D-state included: IO contention is
+  # precisely what makes a Testcontainers run flaky.
+  # awk, not [ -ge ]: load1 is decimal and test(1) is integer-only.
+  if awk -v a="$load1" -v b="$max_load1" 'BEGIN{exit !(a>=b)}'; then
+    refuse "load1_at_or_above_${max_load1}"
+  fi
+else
+  # A round gates on RUNNABLE, not load1 -- it needs CPU, not disk.
+  if [ "$runnable_max" -ge "$max_runnable" ]; then
+    refuse "runnable_at_or_above_${max_runnable}"
+  fi
+  # Concurrent-round cap. v1-v4 PRINTED `rounds=` and enforced nothing, so the
+  # gate returned GATE=OK at rounds=3 -- a field that looked authoritative while
+  # verifying nothing, the same shape as the v1 userns defect. Found by
+  # lane-port-work-items. Mirrors the container cap, including counting the run
+  # being started.
+  if [ "$next_rounds" -gt "$max_rounds" ]; then
+    refuse "rounds_cap"
+  fi
+fi
+
+if [ "$starts_container" = "yes" ]; then
+  # The cap counts the run being started: "would this launch exceed it".
+  if [ "$next" -gt "$max_total" ]; then
+    refuse "container_cap"
+  fi
+else
+  # Non-container launch: a codex round. The apparmor restriction must be
+  # genuinely OFF (0). "absent" refuses too -- see the read above.
+  if [ "$apparmor_userns" != "0" ]; then
+    refuse "apparmor_userns_restricted"
+  fi
+fi
+
+printf 'GATE=OK n=%s r=%s total=%s load1=%s max_load1=%s runq=%s runnable_max=%s max_runnable=%s codex_live=%s wrapper_rounds=%s rounds=%s max_rounds=%s next_rounds=%s userns_clone=%s apparmor_userns=%s max_total=%s next=%s\n' \
+  "$n" "$r" "$total" "$load1" "$max_load1" "$runq" "$runnable_max" "$max_runnable" "$codex_live" "$wrapper_rounds" "$rounds" "$max_rounds" "$next_rounds" "$userns_clone" "$apparmor_userns" "$max_total" "$next"
+exit 0

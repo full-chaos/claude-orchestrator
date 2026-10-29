@@ -1,0 +1,7 @@
+# prodroll-v3/ssh_config (prodroll v3, kit file, SUMS-pinned; ssh -F; a correctness pin, not a sandbox): the `prod` Host block of /home/ubuntu/.ssh/config, with an absolute IdentityFile, User, IdentitiesOnly and BatchMode
+Host prod
+  HostName 10.0.0.151
+  User ubuntu
+  IdentityFile /home/ubuntu/.ssh/ssh-key-2026-01-28.key
+  IdentitiesOnly yes
+  BatchMode yes

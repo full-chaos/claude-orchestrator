@@ -1,0 +1,49 @@
+# prodroll v3e inputs: CHAOS-11712 rev2 = deploy #684 (main d4c9131b, "Operator-owned PgBouncer credentials Secret"), dev-health image-kit step 20. DATA only. Author: fcc (built by lane fcc-11703).
+# Live = helm rev 426 = main f301c670 (ops e99787a5). Roll FROM main d4c9131b (same ops pin e99787a5; values.prod.yaml ops.goWorkers.pgbouncer.secret {create: false, externalSecretName: dev-health-ops-go-pgbouncer}).
+# Render delta (fcc render-11712-194251Z.log 37fb30bc; local RENDER-PATHS i20 of the lane clones: 16/16 FIELD rows, UNEXPECTED 0): 0 image rows, 0 Deployment/StatefulSet/Service/NetworkPolicy rows;
+# 16 secretKeyRef.name rows in the 2 hook Jobs (provision-roles 4, route-activate 12) -> dev-health-ops-go-pgbouncer; 3 Secret docs leave the render (go-pgbouncer: live, keep annotation since rev 425; provision-roles-secrets and route-activate-secrets: hook Secrets). RENDER-PATHS drops Secret docs, so those 3 are no rows: v3e names them in REMOVED_DOC (the full-render-diff `names` gate in the I3p and I3d ssh).
+# norolls form: no Deployment row -> IMG_MODE=norolls, IMG_DEPLOYS=none; the worker anchor 2384953f663a must stay. No pod rolls: PODSNAP_TARGETS=none exempts no Deployment.
+PRODROLL_INPUTS=3
+TARGET=dev-health
+RUN_TAG=s20-a
+AUTHOR=fcc
+STEP=20
+SVC_SHA=d4c9131bfee56349ea4db6cf29768297316e534a
+ROLLBACK_SHA=f301c670ab2a70f3e7ab4d4f3758e2e53c5f6111
+EXP_START_REV=426
+GUARD_LIVE_STEP=6
+PGVER=0066,0162
+IMG_OLD=2384953f663a
+IMGROW=Job/dev-health-ops-provision-roles .spec.template.spec.containers[0].env[3].valueFrom.secretKeyRef.name dev-health-ops-provision-roles-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-provision-roles .spec.template.spec.containers[0].env[4].valueFrom.secretKeyRef.name dev-health-ops-provision-roles-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-provision-roles .spec.template.spec.containers[0].env[5].valueFrom.secretKeyRef.name dev-health-ops-provision-roles-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-provision-roles .spec.template.spec.containers[0].env[8].valueFrom.secretKeyRef.name dev-health-ops-provision-roles-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-route-activate .spec.template.spec.initContainers[0].env[12].valueFrom.secretKeyRef.name dev-health-ops-route-activate-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-route-activate .spec.template.spec.initContainers[0].env[16].valueFrom.secretKeyRef.name dev-health-ops-route-activate-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-route-activate .spec.template.spec.initContainers[0].env[8].valueFrom.secretKeyRef.name dev-health-ops-route-activate-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-route-activate .spec.template.spec.initContainers[1].env[12].valueFrom.secretKeyRef.name dev-health-ops-route-activate-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-route-activate .spec.template.spec.initContainers[1].env[16].valueFrom.secretKeyRef.name dev-health-ops-route-activate-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-route-activate .spec.template.spec.initContainers[1].env[8].valueFrom.secretKeyRef.name dev-health-ops-route-activate-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-route-activate .spec.template.spec.initContainers[2].env[12].valueFrom.secretKeyRef.name dev-health-ops-route-activate-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-route-activate .spec.template.spec.initContainers[2].env[16].valueFrom.secretKeyRef.name dev-health-ops-route-activate-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-route-activate .spec.template.spec.initContainers[2].env[8].valueFrom.secretKeyRef.name dev-health-ops-route-activate-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-route-activate .spec.template.spec.initContainers[3].env[12].valueFrom.secretKeyRef.name dev-health-ops-route-activate-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-route-activate .spec.template.spec.initContainers[3].env[16].valueFrom.secretKeyRef.name dev-health-ops-route-activate-secrets dev-health-ops-go-pgbouncer
+IMGROW=Job/dev-health-ops-route-activate .spec.template.spec.initContainers[3].env[8].valueFrom.secretKeyRef.name dev-health-ops-route-activate-secrets dev-health-ops-go-pgbouncer
+RENDER_FILE=/home/ubuntu/devhealth/.remember/acr-mcp/lanes/fcc-11788/inputs/render-20-d4c9131b.yaml
+RENDER_SHA256=c919e2680f64729af80a0a4df9718b039b68b05c5ddf1f619365c78f2e298ac5
+PODSNAP_TARGETS=none
+PODSNAP_SCALERS=dev-health-ops-web,dev-health-ops-go-heavy,dev-health-ops-go-ops,dev-health-ops-go-sync
+# v3e (pm rule): the 3 removed docs, named exactly; no doc added. go-pgbouncer stays live by its keep annotation (SECRET_KEEP); the 2 hook Secrets (HOOK_SECRET) are hook resources.
+REMOVED_DOC=Secret/dev-health-ops-go-pgbouncer
+REMOVED_DOC=Secret/dev-health-ops-provision-roles-secrets
+REMOVED_DOC=Secret/dev-health-ops-route-activate-secrets
+SECRET_KEEP=dev-health-ops-go-pgbouncer
+HOOK_SECRET=dev-health-ops-provision-roles-secrets
+HOOK_SECRET=dev-health-ops-route-activate-secrets
+# the 4 key NAMES the 16 hook-Job rows now read from the live go-pgbouncer (names only; fcc READ-11712-sha12 b5e83555 read their values == values)
+SECRET_KEYS=dev-health-ops-go-pgbouncer:RIVER_COORDINATOR_DATABASE_PASSWORD,RIVER_DOMAIN_DATABASE_PASSWORD,RIVER_KEDA_READONLY_PASSWORD,RIVER_QUEUE_DATABASE_PASSWORD
+SCRAPE=no
+MIGJOBLOG=yes
+ROLLBACK_REV=426
+EXPECT_NEWEST_REV=427

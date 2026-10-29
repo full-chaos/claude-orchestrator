@@ -1,0 +1,24 @@
+# prodroll v3 inputs: dev-health image step 19 (CHAOS-11705, deploy #691) = kit 24f-11705-r13 as DATA (SVC-STEPS row 19 + IMGROWS-19.txt).
+# The form of a dev-health roll. This step rolled live as rev 426 = deploy main f301c670 (ops e99787a5) on 2026-10-28: a record of the form, not a pending roll.
+PRODROLL_INPUTS=3
+TARGET=dev-health
+RUN_TAG=s19-a
+# AUTHOR = the lead who wrote these inputs (D6436); the ATTEST checker must be another lead.
+AUTHOR=fcc
+STEP=19
+SVC_SHA=f301c670ab2a70f3e7ab4d4f3758e2e53c5f6111
+ROLLBACK_SHA=309dadea15b861903a9eefb9eb6319f8dfad8c40
+EXP_START_REV=425
+GUARD_LIVE_STEP=6
+PGVER=0066,0162
+IMG_OLD=2384953f663a
+IMGROW=Deployment/dev-health-ops-go-api .spec.template.spec.containers[0].env[41].value 10.42.0.0/24 10.42.0.0/24,!10.42.0.0,!10.42.0.1
+RENDER_FILE=/home/ubuntu/devhealth/.remember/acr-mcp/lanes/fcc-roll24c/24f-11705-r13/out/svc/render-19.yaml
+RENDER_SHA256=3b9225d65b1195a9563cbc24036b16df5e0c20f888229d9a3216fb4fa3beaaed
+PODSNAP_TARGETS=dev-health-ops-go-api
+PODSNAP_SCALERS=dev-health-ops-web,dev-health-ops-go-heavy,dev-health-ops-go-ops,dev-health-ops-go-sync
+SCRAPE=no
+MIGJOBLOG=yes
+# ROLLBACK_REV is MANDATORY: = EXP_START_REV = the LIVEREV the pre phase reads live (I1); the rollback target, checked again at rollback.
+ROLLBACK_REV=425
+EXPECT_NEWEST_REV=426

@@ -1,0 +1,5 @@
+shellcheck 0.11.0 (the version ci/shellcheck_pinned.sh requires).
+binary sha256 127f13925eadd52c341bca0ebaf9ab0dbd78c6468f30a8f262a528bf8de47546
+source: the official koalaman/shellcheck v0.11.0 shellcheck-v0.11.0.linux.aarch64.tar.gz release tarball, sha256 68a8133197a50beb8803f8d42f9908d1af1c5540d4bb05fdfca8c1fa47decefc (matches the GitHub published asset digest), checked by lane-10299 on 2026-10-21.
+placed 2026-10-21 by fcsup; no system install.
+usage: PATH=/var/lib/oci-cache/lane-scratch/shared/tools/shellcheck-0.11.0:$PATH git push   (the lefthook pre-push shellcheck-pin needs 0.11.0)

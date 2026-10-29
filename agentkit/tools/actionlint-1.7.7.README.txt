@@ -1,0 +1,5 @@
+- version 1.7.7, built from source with `go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7` using go version go1.27.2 linux/arm64, module checksums verified by sum.golang.org;
+- binary sha256: 2ec409dcb3604461b19c8187a2accd70fb22d2829f9f753e4ada7c93d068032f
+- the linux_amd64 release tarball (sha256 023070a2…) was the wrong arch for this aarch64 host (it crashed under emulation with lfstack.push); removed.
+- placed 2026-10-21 by fcsup on MCP's word;
+- usage: `/var/lib/oci-cache/lane-scratch/shared/tools/actionlint-1.7.7/actionlint -shellcheck= -pyflakes= <repo>/.github/workflows/*.yml`.

@@ -1,0 +1,22 @@
+# prodroll v3 inputs: CHAOS-11699 ingress-nginx roll (ROLL-INPUTS-11699-v1 dc4a254f); the live values of RUN-11699-ingress-161433Z.log. DATA only.
+# Constants in prodroll.sh (not inputs): the tree /home/ubuntu/lane-prod-k8s/deploy-roll-24d, the chart tgz path + sha256 93ea7cf2 + version 4.14.5,
+# the values path prod/ingress-nginx.values.yaml, the rows shape (3 ConfigMap rows from the EXPECT values).
+PRODROLL_INPUTS=3
+TARGET=ingress-nginx
+RUN_TAG=i11699-a
+# AUTHOR = the lead who wrote these inputs (D6436); the ATTEST checker must be another lead.
+AUTHOR=fcc
+TREE_SHA=309dadea15b861903a9eefb9eb6319f8dfad8c40
+VALUES_BLOB=b20d430f61fbbd5b34a5f0022519f1025bb1565b
+BASE_SHA=e6903c19a520322a66cd2c7f3a201d335b38b190
+MIN_DOCS=12
+EXPECT_USE_FORWARDED_HEADERS=true
+EXPECT_PROXY_REAL_IP_CIDR=10.42.0.1/32
+EXPECT_COMPUTE_FULL_FORWARDED_FOR=false
+P3_HELM_KEYS=proxy-set-headers
+P3_PATCH_KEYS=compute-full-forwarded-for,proxy-real-ip-cidr,use-forwarded-headers
+CNI_ADDR=10.42.0.1/24
+# ROLLBACK_REV is MANDATORY and must equal EXP_START_REV and the P1 rev the pre phase reads live. This is the 11699 form (rolled 3 -> 4 on 2026-10-28; a record of the form).
+EXP_START_REV=3
+ROLLBACK_REV=3
+EXPECT_NEWEST_REV=4

@@ -1,0 +1,28 @@
+--- /home/ubuntu/devhealth/scripts/codex-review/codex-review.sh.v4.8.32-e99e0d52	2026-10-21 23:00:10.258981308 +0000
++++ /home/ubuntu/devhealth/scripts/codex-review/codex-review.sh.v4.8.33-720a36c9	2026-10-26 18:07:47.657577114 +0000
+@@ -500,7 +500,9 @@
+ # neither a SUCCEEDED `git diff` exec block nor a SUCCEEDED read of that file (the
+ # EXEC-CLASSIFY awk gained a fourth number). Everything else is byte-identical to
+ # v4.8.21. tools/codex-review/test-exec-classify.sh pins the new rule.
+-VERSION="4.8.27"
++# v4.8.33: the warm-step cache-size `du` lines no longer abort the round when du exits 1 (see the note at WARM_MODCACHE_SIZE).
++# Everything else is byte-identical to v4.8.32.
++VERSION="4.8.33"
+ 
+ warn() { printf 'codex-review: %s\n' "$*" >&2; }
+ die()  { warn "$*"; exit 1; }
+@@ -1773,9 +1775,12 @@
+   # dir this script itself created and already mkdir'd, so it always exists;
+   # `|| true` + a fallback field covers the (unexpected) case du itself is
+   # missing or errors, rather than aborting the round over a reporting line.
+-  WARM_MODCACHE_SIZE=$(du -sh "$RGOMODCACHE" 2>/dev/null | cut -f1)
++  # v4.8.33: both `du` lines take `|| true` like WARM_MODULES above. Under pipefail a `du` that exits 1 because files
++  # vanished mid-walk in the shared go-build cache (other rounds warm it at the same time) aborted the round silently after
++  # a clean warm (round954). The size is only a reporting line.
++  WARM_MODCACHE_SIZE=$(du -sh "$RGOMODCACHE" 2>/dev/null | cut -f1) || true
+   WARM_MODCACHE_SIZE=${WARM_MODCACHE_SIZE:-unknown}
+-  WARM_GOCACHE_SIZE=$(du -sh "$RGOCACHE" 2>/dev/null | cut -f1)
++  WARM_GOCACHE_SIZE=$(du -sh "$RGOCACHE" 2>/dev/null | cut -f1) || true
+   WARM_GOCACHE_SIZE=${WARM_GOCACHE_SIZE:-unknown}
+   # v4.8.4: a warm-step failure whose raw `go` error names an unwritable
+   # $GOPATH/pkg/sumdb path (bigboy: ~/go and ~/go/pkg are root:root 755)

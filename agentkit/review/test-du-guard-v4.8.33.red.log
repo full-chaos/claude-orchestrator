@@ -1,0 +1,4 @@
+
+rc=1
+FAIL: the round died after a du exit 1 (silent abort under set -euo pipefail)
+red rc=1

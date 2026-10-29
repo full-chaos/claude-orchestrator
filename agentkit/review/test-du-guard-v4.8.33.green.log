@@ -1,0 +1,4 @@
+CONTINUED mod=123M go=123M
+rc=0
+PASS: the round continues and keeps the size
+green rc=0
