@@ -2,10 +2,10 @@ import type {
   CommandRunInput,
   FsEntry,
   On,
-  PromptComposeInput,
   PromptSubmitInput,
   SessionCompactInput,
   SessionMeasureInput,
+  SessionMessage,
   SessionReceiveInput,
   SessionStartInput,
   ToolCallInput,
@@ -40,17 +40,6 @@ last updated 2026-10-01
 export const SESSION: SessionStartInput = { surface: 'terminal', isInteractive: true, cwd: '/work' }
 
 export const HEADLESS: SessionStartInput = { surface: null, isInteractive: false, cwd: '/work' }
-
-export const COMPOSED: PromptComposeInput = {
-  model: 'example-model-1',
-  promptModel: 'example-model-1',
-  surfaces: ['terminal'],
-  tools: ['Bash'],
-  outputStyle: null,
-  traits: [],
-}
-
-export const BASE = [{ id: 'intro', text: 'intro', scope: 'shared' }] as const
 
 export const orch = (args: string): CommandRunInput => ({
   command: 'orch',
@@ -92,6 +81,8 @@ export function worldOf(on: On, files: Record<string, File>, percent = 10) {
     toasts: [] as string[],
     logs: [] as string[],
     prompts: [] as string[],
+    /** The context each prompt a plugin submitted entered with, beside `prompts`. */
+    promptContext: [] as (readonly string[])[],
     typed: [] as string[],
     typedContext: [] as string[],
     compacts: [] as SessionCompactInput[],
@@ -133,6 +124,8 @@ export function worldOf(on: On, files: Record<string, File>, percent = 10) {
     compactMs: 0,
     /** What the engine does when the /compact command runs: set by the test; nothing while unset. */
     runCompact: undefined as undefined | ((args: string) => Promise<unknown>),
+    /** The main conversation's rows: each prompt that enters adds one, a compaction leaves its summary. */
+    messages: [] as SessionMessage[],
   }
 
   const dirsUnder = (path: string): FsEntry[] => {
@@ -236,14 +229,17 @@ export function worldOf(on: On, files: Record<string, File>, percent = 10) {
 
     if (e.origin.kind === 'plugin') {
       seen.prompts.push(e.text)
+      seen.promptContext.push(e.context ?? [])
     } else {
       seen.typed.push(e.text)
       seen.typedContext.push(...(e.context ?? []))
     }
 
+    world.messages.push({ role: 'user', text: [e.text, ...(e.context ?? [])].join('\n\n'), toolUses: [] })
+
     return { text: e.text, context: e.context }
   })
-  on('prompt.compose', () => ({ sections: [...BASE] }))
+  on('session.messages', () => ({ value: world.messages }))
   on('session.measure', (_engine, e) => ({ changed: e.changed }))
   on('session.compact', async (_engine, e) => {
     seen.compacts.push(e)
@@ -254,6 +250,10 @@ export function worldOf(on: On, files: Record<string, File>, percent = 10) {
 
     if (world.skipCompact !== '') {
       return { skip: world.skipCompact }
+    }
+
+    if (e.trigger !== 'precompute') {
+      world.messages = [{ role: 'user', text: 'the summary', toolUses: [] }]
     }
 
     return {
