@@ -4,8 +4,6 @@ import type { Engine } from 'claude-code/testing'
 
 import type { OrchBinding, OrchSequence } from '../types'
 import {
-  BASE,
-  COMPOSED,
   FRONTMATTER,
   HEADLESS,
   MARKER,
@@ -25,7 +23,7 @@ import {
   worldOf,
 } from './fixtures/world'
 
-const ROLE = 'orch:role'
+const TAG = '[orch-role demo]'
 const HANDOFF = '[orch] Update the handoff now'
 const RESTART = 'Read /work/.remember/demo/README.md and continue as orchestrator for demo.'
 const PICKUP = "you're the orchestrator for the demo project. Pick up from your handoff @.remember/demo/README.md"
@@ -41,13 +39,18 @@ async function bound($: Engine, on: On, session = SESSION) {
   return world
 }
 
-async function roleOf($: Engine, traits: (typeof COMPOSED)['traits'] = []) {
-  const { sections } = await $.prompt.compose({ ...COMPOSED, traits })
+/** The role message the next prompt (a background task's notification: it binds nothing) carries, if any. */
+async function roleOf($: Engine) {
+  const entered = await $.prompt.submit({ ...typed('a task ended'), origin: { kind: 'task-notification' } })
 
-  return sections.find(section => section.id === ROLE)
+  return entered.context?.find(entry => entry.startsWith('[orch-role '))
 }
 
 const OWN = 'The handoff file was updated before this compaction.'
+const LINE =
+  'Orchestrator for demo: Move the API and the CLI from Python to Go. Keep: open lanes, pending decisions, in-flight PRs and tickets, restart steps. Entry point .remember/demo/README.md.'
+/** The arguments of the /compact the mod asks for. */
+const ASKED = `${OWN}\n\n${LINE}`
 
 /** The one-time code the mod wrote into its handoff prompt (the last one it submitted). */
 const codeOf = (world: { seen: { prompts: string[] } }) =>
@@ -151,7 +154,6 @@ describe('register', () => {
       await $.session.start(SESSION)
       await $.prompt.submit(typed(PICKUP))
 
-      expect((await roleOf($))?.text).toContain('orchestrator for project `demo`')
       expect(world.seen.typed).toEqual([PICKUP])
       expect(world.seen.typedContext, 'the role rides the prompt that bound').toHaveLength(1)
       expect(world.seen.typedContext[0]).toContain('You are the orchestrator for project `demo`')
@@ -159,7 +161,8 @@ describe('register', () => {
 
       await $.prompt.submit(typed(PICKUP))
 
-      expect(world.seen.typedContext, 'once: a bound session adds nothing to a prompt').toHaveLength(1)
+      expect(world.seen.typedContext, 'once: the conversation holds the role').toHaveLength(1)
+      expect(await roleOf($)).toBeUndefined()
     })
 
     test('a prompt binds nothing without the role word, with two projects, with no such project, or from a lane', async ($, on) => {
@@ -186,13 +189,15 @@ describe('register', () => {
     })
 
     test('a prompt does not move a session that is bound', async ($, on) => {
-      worldOf(on, { ...demo(), '/work/.remember/other/README.md': { text: '# Other\n', mtimeMs: OLD } })
+      const world = worldOf(on, { ...demo(), '/work/.remember/other/README.md': { text: '# Other\n', mtimeMs: OLD } })
 
       await $.session.start(SESSION)
       await $.command.run(orch('other'))
       await $.prompt.submit(typed(PICKUP))
 
-      expect((await roleOf($))?.text).toContain('project `other`')
+      expect(world.seen.typedContext).toHaveLength(1)
+      expect(world.seen.typedContext[0]).toStartWith('[orch-role other] ')
+      expect(world.seen.toasts.join('\n')).not.toContain('from your prompt')
     })
   })
 
@@ -218,7 +223,7 @@ describe('register', () => {
       expect(ran.context?.[0]).toContain('You are the orchestrator for project `demo2`: Ship the "v2" API: fast')
       expect(world.seen.logs).toContain('created .remember/demo2/README.md')
       expect(world.seen.status.at(-1)).toBe('demo2 10/55%')
-      expect((await roleOf($))?.text).toContain('project `demo2`')
+      expect(await roleOf($)).toContain('project `demo2`')
     })
 
     test('/orch new <slug> with no goal writes a visible TODO and says so', async ($, on) => {
@@ -312,34 +317,65 @@ describe('register', () => {
   })
 
   describe('role', () => {
-    test('the main prompt holds the role section last, on the session side', async ($, on) => {
-      await bound($, on)
+    test('a bound session: the next prompt carries the role message, tagged; a prompt after it carries none', async ($, on) => {
+      const world = await bound($, on)
 
-      const { sections } = await $.prompt.compose(COMPOSED)
+      await $.prompt.submit(typed('status?'))
 
-      expect(sections.slice(0, -1)).toEqual([...BASE])
-      expect(sections.at(-1)).toMatchObject({ id: ROLE, scope: 'session' })
-      expect(sections.at(-1)?.text).toContain('Move the API and the CLI from Python to Go')
-      expect(sections.at(-1)?.text).toContain('(project: Dev Health Ops)')
-      expect(sections.at(-1)?.text).toContain('- Linear document "Go cutover TRD" is the plan of record')
-      expect(sections.at(-1)?.text).toContain('stay below 55% context')
-      expect(sections.at(-1)?.text).toContain('One lane for each PR.')
+      const [role] = world.seen.typedContext
+
+      expect(world.seen.typedContext).toHaveLength(1)
+      expect(role).toStartWith(`${TAG} The orch mod bound this session to orchestrator project demo. The orch mod repeats this message after each compaction.`)
+      expect(role).not.toContain('system prompt')
+      expect(role).toContain('Move the API and the CLI from Python to Go')
+      expect(role).toContain('(project: Dev Health Ops)')
+      expect(role).toContain('- Linear document "Go cutover TRD" is the plan of record')
+      expect(role).toContain('stay below 55% context')
+      expect(role).toContain('One lane for each PR.')
+
+      await $.prompt.submit(typed('and now?'))
+
+      expect(world.seen.typedContext, 'the conversation holds the tag').toHaveLength(1)
     })
 
-    test("a teammate's render of the prompt holds no role section", async ($, on) => {
+    test('every kind of prompt carries the role while the conversation lacks it', async ($, on) => {
       await bound($, on)
 
-      expect((await $.prompt.compose({ ...COMPOSED, traits: ['teammate'] })).sections).toEqual([...BASE])
+      const entered = await $.prompt.submit({ ...typed('hi'), origin: { kind: 'peer' } })
+
+      expect(entered.context).toEqual([expect.stringContaining(TAG)])
+      expect(await roleOf($), 'the peer prompt left it').toBeUndefined()
     })
 
-    test('an unbound session holds no role section, no status and takes no action at any fill', async ($, on) => {
+    test('a prompt that runs a slash command carries no role', async ($, on) => {
+      await bound($, on)
+
+      const entered = await $.prompt.submit({ ...typed('/review'), command: { name: 'review', args: '' } })
+
+      expect(entered.context).toBeUndefined()
+      expect(await roleOf($), 'the next prompt does').toContain(TAG)
+    })
+
+    test('a compaction drops the tag with the rows: the next prompt carries the role again', async ($, on) => {
+      const world = await bound($, on)
+
+      await $.prompt.submit(typed('status?'))
+      await $.session.compact(compaction({}))
+
+      expect(world.messages.map(row => row.text)).toEqual(['the summary'])
+      expect(await roleOf($)).toContain(TAG)
+    })
+
+    test('an unbound session carries no role, no status and takes no action at any fill', async ($, on) => {
       const world = worldOf(on, demo())
 
       await $.session.start(SESSION)
       await $.session.measure(measureAt(90))
       await world.clock.settle()
+      await $.prompt.submit(typed('status?'))
 
-      expect((await $.prompt.compose(COMPOSED)).sections).toEqual([...BASE])
+      expect(world.seen.typedContext).toEqual([])
+      expect(await roleOf($)).toBeUndefined()
       expect(world.seen.status).toEqual([])
       expect(world.seen.toasts).toEqual([])
       expect(world.seen.logs).toEqual([])
@@ -475,23 +511,57 @@ describe('register', () => {
 
       await world.clock.settle()
 
-      expect(world.seen.commands, 'asked for while the handoff turn still runs: it waits in the queue').toEqual([OWN])
+      expect(world.seen.commands, 'asked for while the handoff turn still runs: it waits in the queue').toEqual([ASKED])
       expect(world.seen.compacts).toHaveLength(1)
       expect(world.seen.compacts[0]?.trigger).toBe('manual')
-      expect(world.seen.compacts[0]?.instructions).toStartWith('Orchestrator for demo: Move the API')
-      expect(world.seen.compacts[0]?.instructions).toEndWith(OWN)
+      expect(world.seen.compacts[0]?.instructions, 'the project line once').toBe(ASKED)
       expect(world.seen.compacts[0]?.instructions).not.toContain('No handoff was signaled')
 
       await $.turn.complete(turnEnd('t1'))
       await world.clock.settle()
 
-      expect(world.seen.commands, 'the turn end asks for nothing more').toEqual([OWN])
-      expect(world.seen.prompts).toEqual([expect.stringContaining(HANDOFF), RESTART])
+      expect(world.seen.commands, 'the turn end asks for nothing more').toEqual([ASKED])
+      expect(world.seen.prompts).toEqual([expect.stringContaining(HANDOFF), expect.stringContaining(RESTART)])
       expect(logsOf(world)).toContain('handoff signal received (tool handoff_done): README and lanes written')
       expect(logsOf(world)).toContain('handoff signaled; /compact asked for')
       expect(logsOf(world)).toContain('sequence ended: compacted (900 to 100 tokens)')
       expect(toastsOf(world), 'a sequence that compacted is not a stop').not.toContain('stopped')
       expect(await shown($)).toContain('last sequence: compacted (900 to 100 tokens)')
+    })
+
+    // A managed plugin (sec-default) holds session.compact from the user tier: the mod's hook never runs.
+    test('a held compaction hook: rows that drop under /compact count as compacted, and the restart prompt carries the role', async ($, on) => {
+      const world = await atHandoffTurn($, on)
+
+      world.messages.push({ role: 'assistant', text: 'written', toolUses: [] }, { role: 'user', text: 'more', toolUses: [] })
+      world.runCompact = async () => {
+        world.messages = [{ role: 'user', text: 'the summary', toolUses: [] }]
+      }
+      await $.tool.call(done('demo', codeOf(world)))
+      await world.clock.settle()
+
+      expect(world.seen.commands).toEqual([ASKED])
+      expect(world.seen.compacts, 'the hook did not run').toEqual([])
+      expect(logsOf(world)).toContain('sequence ended: compacted (rows 3 to 1)')
+      expect(world.seen.prompts.at(-1), 'the summary dropped the tag; the restart prompt carries the role').toStartWith(
+        `${RESTART}\n\n${TAG} The orch mod bound this session to orchestrator project demo. The orch mod repeats this message after each compaction.\n\n# Orchestrator role (orch mod)`,
+      )
+      expect(world.seen.prompts.at(-1)).toContain('One lane for each PR.')
+      expect(world.seen.promptContext.at(-1)).toEqual([])
+      expect(await roleOf($), 'the restart row holds the tag').toBeUndefined()
+      expect(toastsOf(world)).not.toContain('stopped')
+    })
+
+    test('a held compaction hook: rows that do not drop under /compact stop the sequence with no restart prompt', async ($, on) => {
+      const world = await atHandoffTurn($, on)
+
+      world.runCompact = async () => {}
+      await $.tool.call(done('demo', codeOf(world)))
+      await world.clock.settle()
+
+      expect(world.seen.commands).toEqual([ASKED])
+      expect(toastsOf(world)).toContain('handoff sequence stopped: no compaction: /compact ran and did not compact. Run /compact.')
+      expect(world.seen.prompts).toEqual([expect.stringContaining(HANDOFF)])
     })
 
     // webd session 26211431: `lane-wr-scribe` is an Agent-tool subagent of the
@@ -507,9 +577,9 @@ describe('register', () => {
 
       expect(String(answer.result)).toContain('accepted')
       expect(logsOf(world)).toContain('handoff signal received (tool handoff_done, agent a7)')
-      expect(world.seen.commands).toEqual([OWN])
+      expect(world.seen.commands).toEqual([ASKED])
       expect(world.seen.compacts).toHaveLength(1)
-      expect(world.seen.prompts.at(-1)).toBe(RESTART)
+      expect(world.seen.prompts.at(-1)).toStartWith(RESTART)
     })
 
     test('a handoff turn that ends with no call keeps the sequence open and shows the code; a later call compacts', async ($, on) => {
@@ -531,8 +601,8 @@ describe('register', () => {
       await $.tool.call(done('demo', code))
       await world.clock.settle()
 
-      expect(world.seen.commands).toEqual([OWN])
-      expect(world.seen.prompts.at(-1)).toBe(RESTART)
+      expect(world.seen.commands).toEqual([ASKED])
+      expect(world.seen.prompts.at(-1)).toStartWith(RESTART)
     })
 
     test('a wrong code is refused and changes nothing', async ($, on) => {
@@ -572,7 +642,7 @@ describe('register', () => {
       await world.clock.settle()
 
       expect(again.deny).toContain(`code ${code} was used already for demo: the signal is in and the compaction is in the queue. Do not call again.`)
-      expect(world.seen.commands, 'asked for once').toEqual([OWN])
+      expect(world.seen.commands, 'asked for once').toEqual([ASKED])
 
       await world.clock.advance(MINUTE)
 
@@ -581,8 +651,8 @@ describe('register', () => {
       const late = await $.tool.call(done('demo', code))
 
       expect(late.deny).toContain(`code ${code} was used already for demo: the signal is in. Do not call again.`)
-      expect(world.seen.commands).toEqual([OWN])
-      expect(world.seen.prompts.filter(text => text === RESTART)).toHaveLength(1)
+      expect(world.seen.commands).toEqual([ASKED])
+      expect(world.seen.prompts.filter(text => text.startsWith(RESTART))).toHaveLength(1)
     })
 
     test('a call with no sequence open, or with no slug or code, is refused and changes nothing', async ($, on) => {
@@ -674,12 +744,12 @@ describe('register', () => {
 
         await $.turn.complete(turnEnd('t2'))
 
-        expect(world.seen.commands, 'inside the dispatch of that turn end').toEqual([OWN])
+        expect(world.seen.commands, 'inside the dispatch of that turn end').toEqual([ASKED])
 
         await world.clock.settle()
 
         expect(world.seen.compacts).toHaveLength(1)
-        expect(world.seen.prompts.at(-1)).toBe(RESTART)
+        expect(world.seen.prompts.at(-1)).toStartWith(RESTART)
         expect(logsOf(world)).toContain('handoff signal received (marker file .remember/demo/.handoff)')
       })
 
@@ -689,9 +759,9 @@ describe('register', () => {
         world.files[MARKER] = { text: `handoff done ${codeOf(world).toUpperCase()}`, mtimeMs: world.clock.now() }
         await world.clock.advance(16 * 1000)
 
-        expect(world.seen.commands).toEqual([OWN])
+        expect(world.seen.commands).toEqual([ASKED])
         expect(world.seen.compacts).toHaveLength(1)
-        expect(world.seen.prompts.at(-1)).toBe(RESTART)
+        expect(world.seen.prompts.at(-1)).toStartWith(RESTART)
       })
 
       test('a wrong code and an empty file do nothing, and each is logged once', async ($, on) => {
@@ -733,7 +803,7 @@ describe('register', () => {
         await $.turn.complete(turnEnd('t5'))
         await world.clock.advance(5 * MINUTE)
 
-        expect(world.seen.commands, 'the stale code asks for nothing').toEqual([OWN])
+        expect(world.seen.commands, 'the stale code asks for nothing').toEqual([ASKED])
         expect(world.seen.compacts).toHaveLength(1)
         expect(world.seen.logs.filter(text => text.includes('holds a wrong or an old code: ignored'))).toHaveLength(1)
         expect(await shown($)).toContain(`code: ${second}`)
@@ -769,9 +839,9 @@ describe('register', () => {
         await world.clock.advance(MINUTE)
 
         expect(answer.deny === undefined || String(answer.deny).includes('was used already')).toBe(true)
-        expect(world.seen.commands).toEqual([OWN])
+        expect(world.seen.commands).toEqual([ASKED])
         expect(world.seen.compacts).toHaveLength(1)
-        expect(world.seen.prompts.filter(text => text === RESTART)).toHaveLength(1)
+        expect(world.seen.prompts.filter(text => text.startsWith(RESTART))).toHaveLength(1)
       })
 
       test('a call that lands while a step reads the marker file with the code: one compaction', async ($, on) => {
@@ -790,9 +860,9 @@ describe('register', () => {
         await world.clock.advance(MINUTE)
 
         expect(String(answer.result)).toContain('accepted')
-        expect(world.seen.commands).toEqual([OWN])
+        expect(world.seen.commands).toEqual([ASKED])
         expect(world.seen.compacts).toHaveLength(1)
-        expect(world.seen.prompts.filter(text => text === RESTART)).toHaveLength(1)
+        expect(world.seen.prompts.filter(text => text.startsWith(RESTART))).toHaveLength(1)
         expect(world.seen.logs.filter(text => text.includes('handoff signal received'))).toHaveLength(1)
       })
 
@@ -814,8 +884,8 @@ describe('register', () => {
 
         expect(String(answer.result)).toContain('accepted')
         expect(toastsOf(world), 'the step that ran past the limit does not stop a signaled sequence').not.toContain('stopped')
-        expect(world.seen.commands).toEqual([OWN])
-        expect(world.seen.prompts.filter(text => text === RESTART)).toHaveLength(1)
+        expect(world.seen.commands).toEqual([ASKED])
+        expect(world.seen.prompts.filter(text => text.startsWith(RESTART))).toHaveLength(1)
       })
     })
 
@@ -900,9 +970,9 @@ describe('register', () => {
 
         await world.clock.settle()
 
-        expect(world.seen.commands).toEqual([OWN])
+        expect(world.seen.commands).toEqual([ASKED])
         expect(world.seen.compacts).toHaveLength(1)
-        expect(world.seen.prompts.at(-1)).toBe(RESTART)
+        expect(world.seen.prompts.at(-1)).toStartWith(RESTART)
         expect(logsOf(world)).toContain('handoff signal received (relay from another session)')
       })
 
@@ -940,8 +1010,8 @@ describe('register', () => {
         world.store['done/demo'] = { code: codeOf(world), at: world.clock.now(), note: '', from: 'session-of-a-lane' }
         await world.clock.advance(16 * 1000)
 
-        expect(world.seen.commands).toEqual([OWN])
-        expect(world.seen.prompts.at(-1)).toBe(RESTART)
+        expect(world.seen.commands).toEqual([ASKED])
+        expect(world.seen.prompts.at(-1)).toStartWith(RESTART)
         expect(logsOf(world)).toContain('handoff signal received (relay record from session session-of-a-lane)')
         expect(world.store['done/demo'], 'removed when the sequence ended').toBeUndefined()
       })
@@ -970,9 +1040,9 @@ describe('register', () => {
 
         await world.clock.settle()
 
-        expect(world.seen.commands).toEqual([OWN])
+        expect(world.seen.commands).toEqual([ASKED])
         expect(world.seen.compacts).toHaveLength(1)
-        expect(world.seen.prompts.at(-1)).toBe(RESTART)
+        expect(world.seen.prompts.at(-1)).toStartWith(RESTART)
         expect(logsOf(world)).toContain('handoff signal received (the person, /orch done)')
         expect((await $.command.run(orch('done'))).text).toContain('no handoff sequence is open (last sequence: compacted')
       })
@@ -988,7 +1058,7 @@ describe('register', () => {
 
         await world.clock.advance(MINUTE)
 
-        expect(world.seen.commands).toEqual([OWN])
+        expect(world.seen.commands).toEqual([ASKED])
 
         await $.command.run(orch('off'))
 
@@ -1008,7 +1078,7 @@ describe('register', () => {
       await world.clock.settle()
       await $.turn.complete(turnEnd('t1'))
 
-      expect(world.seen.commands).toEqual([OWN])
+      expect(world.seen.commands).toEqual([ASKED])
       expect(world.seen.compacts, 'in the queue: nothing compacts yet').toEqual([])
       expect(await shown($)).toContain('sequence: handoff signaled (tool handoff_done); /compact is in the queue (asked 0 s ago')
 
@@ -1018,14 +1088,14 @@ describe('register', () => {
         await $.turn.complete(turnEnd(turn))
       }
 
-      expect(world.seen.commands, 'three turn ends and the timer later: never asked for twice').toEqual([OWN])
+      expect(world.seen.commands, 'three turn ends and the timer later: never asked for twice').toEqual([ASKED])
       expect(world.seen.compacts).toEqual([])
       expect(toastsOf(world)).not.toContain('stopped')
 
       await world.clock.advance(MINUTE)
 
       expect(world.seen.compacts).toHaveLength(1)
-      expect(world.seen.prompts.filter(text => text === RESTART)).toHaveLength(1)
+      expect(world.seen.prompts.filter(text => text.startsWith(RESTART))).toHaveLength(1)
       expect(logsOf(world)).toContain('sequence ended: compacted (900 to 100 tokens)')
     })
 
@@ -1044,7 +1114,7 @@ describe('register', () => {
         'handoff sequence stopped: no compaction: /compact did not run in 30 minutes after it was asked for. Run /compact.',
       )
       expect(logsOf(world)).toContain('sequence ended: no compaction: /compact did not run in 30 minutes')
-      expect(world.seen.commands).toEqual([OWN])
+      expect(world.seen.commands).toEqual([ASKED])
       expect(world.seen.prompts).toHaveLength(1)
       expect(await shown($)).toContain('last sequence: no compaction: /compact did not run')
     })
@@ -1056,7 +1126,7 @@ describe('register', () => {
       await $.tool.call(done('demo', codeOf(world)))
       await world.clock.advance(MINUTE)
 
-      expect(world.seen.commands).toEqual([OWN])
+      expect(world.seen.commands).toEqual([ASKED])
       expect(toastsOf(world)).toContain('handoff sequence stopped: no compaction: /compact ran and did not compact. Run /compact.')
       expect(logsOf(world)).toContain('sequence ended: no compaction: /compact ran and did not compact')
       expect(world.seen.prompts).toHaveLength(1)
@@ -1069,7 +1139,7 @@ describe('register', () => {
       await $.tool.call(done('demo', codeOf(world)))
       await world.clock.advance(MINUTE)
 
-      expect(world.seen.commands, 'asked once, not at each tick').toEqual([OWN])
+      expect(world.seen.commands, 'asked once, not at each tick').toEqual([ASKED])
       expect(toastsOf(world)).toContain('handoff sequence stopped: no compaction: skipped: a settings hook blocked it. Run /compact.')
       expect(logsOf(world)).toContain('sequence ended: no compaction: skipped: a settings hook blocked it')
       expect(world.seen.prompts).toHaveLength(1)
@@ -1174,7 +1244,7 @@ describe('register', () => {
       await world.clock.advance(MINUTE)
 
       expect(world.seen.compacts, "the person's, then the sequence's").toHaveLength(2)
-      expect(world.seen.prompts.at(-1)).toBe(RESTART)
+      expect(world.seen.prompts.at(-1)).toStartWith(RESTART)
     })
 
     test('a compaction the engine computes ahead of time is not the run of the /compact in the queue', async ($, on) => {
@@ -1191,7 +1261,7 @@ describe('register', () => {
 
       await world.clock.advance(MINUTE)
 
-      expect(world.seen.prompts.at(-1)).toBe(RESTART)
+      expect(world.seen.prompts.at(-1)).toStartWith(RESTART)
     })
 
     test("the person's /compact while the handoff turn runs leaves the sequence open", async ($, on) => {
@@ -1250,8 +1320,8 @@ describe('register', () => {
       await $.tool.call(done('demo', code))
       await world.clock.settle()
 
-      expect(world.seen.commands).toEqual([OWN])
-      expect(world.seen.prompts.at(-1)).toBe(RESTART)
+      expect(world.seen.commands).toEqual([ASKED])
+      expect(world.seen.prompts.at(-1)).toStartWith(RESTART)
     })
 
     test('in a headless session the call in the handoff turn asks for /compact once, and the restart prompt follows', async ($, on) => {
@@ -1265,11 +1335,10 @@ describe('register', () => {
       await $.turn.complete(turnEnd('t1'))
       await world.clock.advance(600)
 
-      expect(world.seen.commands).toEqual([OWN])
+      expect(world.seen.commands).toEqual([ASKED])
       expect(world.seen.compacts).toHaveLength(1)
-      expect(world.seen.compacts[0]?.instructions).toStartWith('Orchestrator for demo:')
-      expect(world.seen.compacts[0]?.instructions).toEndWith(OWN)
-      expect(world.seen.prompts.at(-1)).toBe(RESTART)
+      expect(world.seen.compacts[0]?.instructions).toBe(ASKED)
+      expect(world.seen.prompts.at(-1)).toStartWith(RESTART)
       expect(toastsOf(world), 'its own /compact is not the person compacting').not.toContain('stopped')
     })
 
@@ -1283,8 +1352,8 @@ describe('register', () => {
 
       await world.clock.advance(600)
 
-      expect(world.seen.commands).toEqual([OWN])
-      expect(world.seen.prompts.at(-1)).toBe(RESTART)
+      expect(world.seen.commands).toEqual([ASKED])
+      expect(world.seen.prompts.at(-1)).toStartWith(RESTART)
     })
 
     test('after one sequence the limit starts no other until the fill drops below the warning level', async ($, on) => {
@@ -1369,7 +1438,7 @@ describe('register', () => {
       const ran = await $.command.run(orch('demo'))
 
       expect(ran.text).toContain(`handoff signal: the tool ${TOOL} with the code of the handoff request (backup: the code in .remember/demo/.handoff, or /orch done)`)
-      expect((await roleOf($))?.text).toContain('call the tool `mcp__orch__handoff_done` with the slug and the code from that request')
+      expect(await roleOf($)).toContain('call the tool `mcp__orch__handoff_done` with the slug and the code from that request')
       expect(world.seen.prompts).toEqual([])
     })
   })
@@ -1423,8 +1492,8 @@ describe('register', () => {
       await $.tool.call(done('demo', 'abcd-efgh'))
       await world.clock.settle()
 
-      expect(world.seen.commands).toEqual([OWN])
-      expect(world.seen.prompts).toEqual([RESTART])
+      expect(world.seen.commands).toEqual([ASKED])
+      expect(world.seen.prompts).toEqual([expect.stringContaining(RESTART)])
     })
 
     test('a sequence that waits for its signal across a load still stops at its time limit', async ($, on) => {
@@ -1469,8 +1538,8 @@ describe('register', () => {
       await world.clock.advance(1000)
 
       expect(world.seen.toasts.join('\n')).not.toContain('stopped')
-      expect(world.seen.commands).toEqual([OWN])
-      expect(world.seen.prompts).toEqual([RESTART])
+      expect(world.seen.commands).toEqual([ASKED])
+      expect(world.seen.prompts).toEqual([expect.stringContaining(RESTART)])
     })
 
     test('a /compact asked for before a reload is not asked for again; when it runs, the sequence ends with the restart prompt', async ($, on) => {
@@ -1487,7 +1556,7 @@ describe('register', () => {
       await world.clock.settle()
 
       expect(world.seen.compacts).toHaveLength(1)
-      expect(world.seen.prompts).toEqual([RESTART])
+      expect(world.seen.prompts).toEqual([expect.stringContaining(RESTART)])
       expect(world.seen.logs.join('\n')).toContain('sequence ended: compacted (900 to 100 tokens)')
     })
 

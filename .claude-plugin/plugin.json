@@ -1,7 +1,7 @@
 {
   "name": "orch",
-  "version": "0.3.0",
-  "description": "Orchestrator sessions: bind to .remember/<slug>/README.md, keep the role in the system prompt, and at a context limit ask for a handoff, then compact when the handoff_done tool signals that it is written",
+  "version": "0.4.0",
+  "description": "Orchestrator sessions: bind to .remember/<slug>/README.md, give the role as a message (repeated after each compaction), and at a context limit ask for a handoff, then compact when the handoff_done tool signals that it is written",
   "author": {
     "name": "chris"
   },

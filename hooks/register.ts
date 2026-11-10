@@ -5,6 +5,7 @@ import type {
   Register,
   SessionCompactInput,
   SessionMeasureInput,
+  SessionMessage,
   Timer,
 } from 'claude-code'
 
@@ -12,7 +13,6 @@ import type { OrchBinding, OrchDoneRecord, OrchOpenRecord, OrchPhase, OrchSequen
 import { FRONTMATTER_KEYS, GOAL_TODO, isNewSlug, isSlug, parseProject, scaffoldOf, slugsIn } from './project'
 import { fillRole } from './role'
 
-const SECTION_ID = 'orch:role'
 const HANDOFF_MARK = '[orch] Update the handoff now'
 const OWN_MARK = 'The handoff file was updated before this compaction.'
 const TOOL_NAME = 'handoff_done'
@@ -130,13 +130,30 @@ function roleOf(b: OrchBinding): string {
   })
 }
 
-/**
- * The role as a message of the conversation. The engine renders the system
- * prompt at the first request and again after a compaction, so a session
- * bound between the two reads its role here until the next compaction.
- */
+function roleTagOf(b: OrchBinding): string {
+  return `[orch-role ${b.slug}]`
+}
+
+/** The role as a message of the conversation; the tag tells a prompt whether the conversation holds it. */
 function roleMessageOf(b: OrchBinding): string {
-  return `The orch mod bound this session to orchestrator project ${b.slug}. After the next compaction the system prompt holds the section below; until then this message is that section.\n\n${roleOf(b)}`
+  return `${roleTagOf(b)} The orch mod bound this session to orchestrator project ${b.slug}. The orch mod repeats this message after each compaction.\n\n${roleOf(b)}`
+}
+
+async function rowsNow($: EngineInterface): Promise<SessionMessage[] | null> {
+  try {
+    return await $.session.messages()
+  } catch (error) {
+    note($, `the conversation could not be read: ${messageOf(error)}`)
+
+    return null
+  }
+}
+
+async function needsRole($: EngineInterface, b: OrchBinding): Promise<boolean> {
+  const rows = await rowsNow($)
+  const tag = roleTagOf(b)
+
+  return rows !== null && !rows.some(row => row.role === 'user' && row.text.includes(tag))
 }
 
 function markerOf(b: OrchBinding): string {
@@ -573,8 +590,11 @@ async function requestHandoff($: EngineInterface, why: string): Promise<boolean>
 async function complete($: EngineInterface, b: OrchBinding, how: string, endedAt: number): Promise<void> {
   await endSequence($, how, endedAt)
 
+  // This mod's own prompt.submit hook does not run on its own prompt: the role rides in the text.
+  const text = (await needsRole($, b)) ? `${restartPromptOf(b)}\n\n${roleMessageOf(b)}` : restartPromptOf(b)
+
   // Not awaited: the prompt's own turn starts when the session is free.
-  void $.prompt.submit({ text: restartPromptOf(b) }).then(
+  void $.prompt.submit({ text }).then(
     entered => {
       if (entered.drop === undefined) {
         note($, 'restart prompt submitted')
@@ -633,10 +653,26 @@ async function settle($: EngineInterface, fallback: string): Promise<void> {
 async function ask($: EngineInterface): Promise<void> {
   const at = await $.clock.now()
   const saved = patch($, { phase: 'compacting', phaseAt: at, askedAt: at })
+  const b = boundNow ?? null
+  const args = b === null ? OWN_MARK : `${OWN_MARK}\n\n${projectLineOf(b)}`
 
   ownOutcome = null
-  void $.command.run({ command: 'compact', args: OWN_MARK }).then(
-    () => settle($, '/compact ran and did not compact'),
+
+  const before = (await rowsNow($))?.length
+
+  void $.command.run({ command: 'compact', args }).then(
+    async () => {
+      // A managed plugin (sec-default) can hold session.compact from this mod: the row count tells instead.
+      if (ownOutcome === null && held?.phase === 'compacting' && held.askedAt === at && before !== undefined) {
+        const after = (await rowsNow($))?.length
+
+        if (ownOutcome === null && after !== undefined && after < before) {
+          ownOutcome = { isDone: true, reason: `rows ${before} to ${after}` }
+        }
+      }
+
+      await settle($, '/compact ran and did not compact')
+    },
     (error: unknown) => settle($, `/compact failed: ${messageOf(error)}`),
   )
   await saved
@@ -921,7 +957,8 @@ function sayNotFresh($: EngineInterface, b: OrchBinding): void {
 }
 
 function instructionsOf(e: SessionCompactInput, b: OrchBinding, isFresh: boolean): string {
-  const parts = [projectLineOf(b)]
+  const line = projectLineOf(b)
+  const parts = e.instructions?.includes(line) === true ? [] : [line]
 
   if (!isFresh) {
     parts.push(
@@ -1283,28 +1320,19 @@ export const register: Register = (on, options) => {
       }
     }
 
-    return next(e)
-  })
+    let role = ''
 
-  on('prompt.compose', async ($, e, next) => {
-    const composed = await next(e)
+    try {
+      const b = await bindingNow($)
 
-    if (e.traits.includes('teammate')) {
-      return composed
+      if (b !== null && e.command === undefined && (await needsRole($, b))) {
+        role = roleMessageOf(b)
+      }
+    } catch (error) {
+      note($, `the role check failed: ${messageOf(error)}`)
     }
 
-    const b = await bindingNow($)
-
-    if (b === null) {
-      return composed
-    }
-
-    return {
-      sections: [
-        ...composed.sections.filter(section => section.id !== SECTION_ID),
-        { id: SECTION_ID, text: roleOf(b), scope: 'session' },
-      ],
-    }
+    return role === '' ? next(e) : next({ ...e, context: [...(e.context ?? []), role] })
   })
 
   on('session.measure', async ($, e, next) => {
